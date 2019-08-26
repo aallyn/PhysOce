@@ -1,0 +1,415 @@
+---
+title: "NELME Climate Model Projected SST"
+author: "Andrew Allyn"
+date: "8/16/2019"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE, warning = FALSE, message = FALSE, cache = T, eval = FALSE)
+```
+
+# Background
+This document describes GMRI's Integrated Systems Ecology Lab process for identifying, downloading, processing and summarizing climate model projected sea surface temperatures (SST) completed as part of the CMIP5 project and RCP 4.5 and RCP 8.5 climate experiments. For more detailed background on the CMIP5 project and the different climate experiments, here is an excellent reference document by [Taylor et al. 2012](https://journals.ametsoc.org/doi/pdf/10.1175/BAMS-D-11-00094.1). Briefly, the CMIP5 project was designed to complete a suite of climate simulation to increase our understanding of climate change and fill critical knowledge gaps. Along with individual experiments, each modeling group completed long-term experiments under four representative concentration pathways (RCPs), which capture differences in the radiative forcing relative to preindustrial conditions in the year 2100. Within the four RCP options, we elected to use RCP 4.5 and RCP 8.5, where the RCP 8.5 scenario is generally considered a "worst cast, business as usual scenario" and RCP 4.5 would involve considerable efforts to curb emissions and would keep things below the 2oC danger level without new technologies to capture emissions. [Here is an excellent diagram depicting the different RCP scenarios.](https://coastadapt.com.au/sites/default/files/infographics/15-117-NCCARFINFOGRAPHICS-01-UPLOADED-WEB%2827Feb%29.pdf).
+
+# Methods
+## Model identification and downloading netcdf files
+Within the Integrated Systems Ecology Lab, our main interest with the climate model projections data is quantifying changes in sea surface temperatures and using projected sea surface temperature changes to project ecological processes (i.e., species distribution and abundance, individual growth and survival, etc.). To that end, we used [NOAA'S ESRL Physical Science Division's Climate Change Web Portal](https://www.esrl.noaa.gov/psd/ipcc/ocn/) as a guide for identifying which models should be included within the overall RCP 4.5 and RCP 8.5 scenarios. After completing this process, we registered for a research account and used the Department of Energy Lawrence Livermore National Laboratory ESGF data node to download the data. (A quick side bar here: Andrew tried to automate this process, however, nothing seemed to work as there were too many differences among file paths and many files that needed authentication for downloading). Within the CMIP5 project data search page, there are a variety of filters, including: Project, Product, Institute, Model, Experiment, Experiment Family, Time Frequency, Realm, CMIP5 Table, Ensemble, Variable, Variable Long Name, CF Standard Name and Datanode. Each of the models identifyed on the Climate Change Web Portal were selected in the "Model" filtering box. We then also selected the following options:
+
+*Project = CMIP5
+*Product = output1
+*Experiment = historical, rcp45 and rcp85
+*Time frequency = mon
+*Realm = Ocean
+*Ensemble = r1i1p1
+*Variable = tos
+
+Once we completed this filtering process, we had a more manageable number of models to scroll through. We then selected the most recent version for each of the models and downloaded all corresponding netcdf files as occassionally files were provided in 10 year chunks, where as other models had one file for each of the experiments. A full list of the files downloaded can be viewed [here](https://github.com/aallyn/PhysOce/blob/master/ClimModelDownloadInfo.csv).
+
+## Processing NETCDF files
+### Step 1: Remapping, masking and croping to extent of interest
+Generally, working with NETCDF files in R isn't too big of a challenge. For most netcdf files, the raster library [(Hijmans et al. 2019)](https://cran.r-project.org/package=raster/raster.pdf) will suffice. For other more complicated netcdf files, you may need to use the ncdf4 library [(Pierce 2019)](https://CRAN.R-project.org/package=ncdf4/ncdf4.pdf) instead. Despite considerable efforts, neither of these workflows were successfull given the diversity of the netcdf files downloaded, and in particular, the use of different spatial grids across the different models we wanted to include in our overall ensemble. Fortunately, we found a work around by making system calls within R that leveraged the [Climate Data Operators](https://code.mpimet.mpg.de/projects/cdo) toolbox. Specifically, we used the CDO tools to (1) remap each of the climate model projections to a standard 1 x 1 deg lat long grid, (2) mask out values over land or in the great lakes, and (3) crop the extent of the climate model projections to a region of interest. 
+
+To be able to do this, I first had to install "homebrew" and then used "brew install" to install cdo (see [here](https://code.mpimet.mpg.de/projects/cdo/wiki/MacOS_Platform). I was prompted about permission for xcode build license and followed instructions. After installing, I was then ready to loop over each of the files and process them. I've included the code here, with eval set to false in the global options as running all of this would take a lot of time and some code modification.
+
+```{r}
+# First, the paths to folders where we are doing all our work
+cd.to.path<- list("RCP85" = "~/Box/Data/CMIP5_SST/RCP85/", "RCP45" = "~/Box/Data/CMIP5_SST/RCP45/", "Historical" = "~/Box/Data/CMIP5_SST/Historical/")
+
+# For each of these folders, we are going to want to create a grid, then remap each of the climate model files located within the folder. 
+
+# Some house keeping
+# Region of interest
+ext.x<- c(-76, -60)
+ext.y<- c(35, 46)
+ext.use<- as.numeric(c(ext.x, ext.y))
+lonlatbox<- paste(as.character(ext.use), collapse = ",")
+
+# Pattern to use for files
+pattern.use<- "*.[[:digit:]]\\.*nc"
+
+# Now looping through folders and over files
+for(i in seq_along(cd.to.path)){
+  # CD to folder and create our grid within the system call
+  cd.to.path.use<- cd.to.path[[i]]
+  system(paste("cd", cd.to.path.use, "&& cat > Std1degGrid <<EOF\n
+               gridtype = lonlat\n
+               xsize = 360\n
+               ysize = 180\n
+               xfirst = -179.5\n
+               yfirst = -89.5\n
+               yinc = 1\n
+               xinc = 1\n
+               EOF", sep=" "))
+  
+  clim.mod.files<- list.files(cd.to.path.use, pattern = pattern.use)
+  clim.mods.df<- data.frame("File.Long" = clim.mod.files)
+  clim.mods.df$Group<- unlist(lapply(strsplit(as.character(clim.mods.df$File.Long), "_"), "[", 3))
+  
+  for(j in seq_along(clim.mods.df$File.Long)){
+    regrid.use<- "Std1degGrid"
+    in.file<- as.character(clim.mods.df$File.Long[j])
+    out.file.tempA<- paste(gsub(".nc", "", in.file), "_regrid.nc", sep = "")
+    out.file.tempB<- paste(gsub(".nc", "", in.file), "_regrid_masked.nc", sep = "")
+    out.file<- paste(gsub(".nc", "", in.file), "_regrid_masked_focal.nc", sep = "")
+    run.command<- paste(paste("cd ", cd.to.path.use, sep = ""), 
+                        paste(paste(" ; cdo remapbil,", regrid.use, sep = ""), paste(" -selname,tos,", in.file, out.file.tempA, sep = " "), sep = ""),
+                        paste(paste("; cdo div "), paste(out.file.tempA, "landlakesmaskStdGridUse.nc", out.file.tempB, sep = " "), sep = ""),
+                        #paste(paste(" ; cdo mul ", out.file.tempA, sep = ""), paste(" landlakesmaskStdGrid.nc", out.file.tempB, sep = " "), sep = ""), 
+                        paste(paste(" ; cdo sellonlatbox,", lonlatbox, sep = ""), paste(out.file.tempB, out.file, sep = " ")), sep = "")
+    system(run.command)
+    
+    # Add the info on the new files, needed later, to the clim.mods.df data frame
+    clim.mods.df$File.Regrid[j]<- out.file.tempA
+    clim.mods.df$File.Regrid.Masked[j]<- out.file.tempB
+    clim.mods.df$File.Regrid.Masked.Focal[j]<- out.file
+    
+    # All done, next iteration
+    print(paste(in.file, " is done!", sep = ""))
+  }
+  
+  # Save the dataframe
+  write_csv(clim.mods.df, path = paste(cd.to.path[[i]], "ClimModelData.csv", sep = ""))
+}
+```
+
+### Step 2: Reading in processed files and generating a raster stack for each of the climate models
+```{r}
+# We are going to want to have a raster stack for each of the RCP45 and RCP85 models, which combines not only their information, but also the information from the matching historical runs as this is going to be needed for the climatology calculation. 
+# Let's do the raster conversion for the historical files first...
+clim.mods.hist<- read_csv(paste("~/Box/Data/CMIP5_SST/Historical/", "ClimModelData.csv", sep = ""))
+clim.mods.hist.groups<- unique(clim.mods.hist$Group)
+
+for(i in seq_along(clim.mods.hist.groups)){
+  
+  clim.mods.sub<- clim.mods.hist %>%
+    filter(., Group == unique(clim.mods.hist$Group)[i])
+  
+  # Empty raster stack to output processed data
+  rast.stack.out<- stack()
+  
+  for(j in seq_along(clim.mods.sub$File.Regrid.Masked.Focal)){
+    if(FALSE){
+      rast.temp<- raster::stack(paste(cd.to.path.use, 
+                                      "tos_Omon_IPSL-CM5B-LR_rcp85_r1i1p1_200601-210012_regrid_masked_focal.nc", sep = ""))
+    }
+    
+    rast.temp<- raster::stack(paste("~/Box/Data/CMIP5_SST/Historical/", 
+                                    clim.mods.sub$File.Regrid.Masked.Focal[j], sep = ""))
+    names.use<- names(rast.temp)
+    
+    # Adjust values
+    # Sometimes, land is 0, also sometimes have weird low values, makes these NA below Kelvin freezing point of salt water?
+    rast.temp[rast.temp < 273.15]<- NA
+    
+    # Kelvin to Celsius
+    rast.temp<- raster::calc(rast.temp, fun = function(x) x - 273.15)
+    names(rast.temp)<- names.use
+    
+    # Save it
+    rast.stack.out<- raster::stack(rast.stack.out, rast.temp)
+  }
+  
+  # Write it out fully processed climate output for each of the modeling groups
+  writeRaster(rast.stack.out, filename = paste("~/Box/Data/CMIP5_SST/Historical/", unique(clim.mods.hist$Group)[i], ".grd", sep = ""), overwrite = TRUE)
+  
+  print(paste(unique(clim.mods.hist$Group)[i], " is done!", sep = ""))
+  
+  
+}
+
+## Alright, now the CMP45 and CMP85 projections
+clim.mods.rcp.paths<- list("RCP85" = "~/Box/Data/CMIP5_SST/RCP85/", "RCP45" = "~/Box/Data/CMIP5_SST/RCP45/")
+clim.hist.rasts<- list.files(path = "~/Box/Data/CMIP5_SST/Historical", pattern = "*.*grd", full.names = TRUE)
+
+for(i in seq_along(clim.mods.rcp.paths)){
+  
+  clim.mod.df.use<- read_csv(paste(clim.mods.rcp.paths[[i]], "ClimModelData.csv", sep = ""))
+  
+  #or(j in seq_along(unique(clim.mod.df.use$Group))){
+  for(j in 18:length(unique(clim.mod.df.use$Group))){
+    clim.mods.sub<- clim.mod.df.use %>%
+      filter(., Group == unique(clim.mod.df.use$Group)[j])
+    
+    # Read in correct historical data
+    clim.hist.rast<- raster::stack(clim.hist.rasts[which(grepl(clim.mods.sub$Group, clim.hist.rasts))])
+    names.hist<- names(clim.hist.rast)
+    
+    # Empty raster stack to output projections data, which starts with historical data
+    rast.stack.out<- stack(clim.hist.rast)
+    names(rast.stack.out)<- names.hist
+    
+    for(k in seq_along(clim.mods.sub$File.Regrid.Masked.Focal)){
+      if(FALSE){
+        rast.temp<- raster::stack(paste(cd.to.path.use, 
+                                        "tos_Omon_IPSL-CM5B-LR_rcp85_r1i1p1_200601-210012_regrid_masked_focal.nc", sep = ""))
+      }
+      
+      rast.temp<- raster::stack(paste(clim.mods.rcp.paths[[i]], 
+                                      clim.mods.sub$File.Regrid.Masked.Focal[k], sep = ""))
+      names.use<- names(rast.temp)
+      
+      # Adjust values
+      # Sometimes, land is 0, also sometimes have weird low values, makes these NA below Kelvin freezing point of salt water?
+      rast.temp[rast.temp < 273.15]<- NA
+      
+      # Kelvin to Celsius
+      rast.temp<- raster::calc(rast.temp, fun = function(x) x - 273.15)
+      names(rast.temp)<- names.use
+      
+      # Save it
+      rast.stack.out<- raster::stack(rast.stack.out, rast.temp)
+    }
+    
+    # Write it out fully processed climate output for each of the modeling groups
+    writeRaster(rast.stack.out, filename = paste(clim.mods.rcp.paths[[i]], unique(clim.mod.df.use$Group)[j], "Full.grd", sep = ""), overwrite = TRUE)
+    
+    # Make a quick plot to check visually
+    # Need a time dimension...
+    rast.time<- gsub("[.]", "-", gsub("X", "", names(rast.stack.out)))
+    rast.temp.ts<- setZ(rast.stack.out, rast.time)
+    rast.temp.agg<- zApply(rast.temp.ts, by = month, fun = mean, na.rm = TRUE)
+    rast.temp.agg.df<- as.data.frame(rast.temp.agg, xy = TRUE)
+    colnames(rast.temp.agg.df)[3:ncol(rast.temp.agg.df)]<- c("Jan", "Feb", "March", "April", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
+    rast.df.plot<- rast.temp.agg.df %>%
+      gather(., "Month", "Temp", -x, -y) %>%
+      mutate(., "Month.Factor" = factor(Month, levels = c("Jan", "Feb", "March", "April", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")))
+    
+    rast.check.plot<- ggplot() +
+      geom_raster(data = rast.df.plot, aes(x = x, y = y, fill = Temp), na.rm = TRUE) +
+      scale_fill_viridis(name = "SST", na.value = NA) +
+      geom_sf(data = land.shp, fill = NA) +
+      coord_sf(xlim = ext.x, ylim = ext.y, datum = NA) +
+      facet_wrap(~Month.Factor, nrow = 4) +
+      theme_bw()
+    ggsave(paste(clim.mods.rcp.paths[[i]], unique(clim.mod.df.use$Group)[j], "PlotCheck.png", sep = ""), rast.check.plot)
+    
+    print(paste(unique(clim.mod.df.use$Group)[j], " is done!", sep = ""))
+  }
+}
+```
+
+### Step 3: Bias correcting climate model projections: calculating climatolgies and anomalies
+After completing step 2 we now have a collection of raster stacks for each of the models and experiments, but we still have another step to complete before we can actually use the climate model projected SSTs because of a well known phenomenon of climate models within the Northeast Large Marine Ecosystem, known as the "warm bias." The warm bias occurs because the climate models position the Gulf Stream too far north. This warm bias needs to be accounted for by adjusting climate model projected anomalies according to the difference between the climate models mean predictions to the observed OISST during the historical reference period (1982-2011). To do this, we need to calculate the climatology of each of the climate models for the 1982-2011 baseline period and then calculate year-month anomalies from their climatolgy. These anomalies are then added to the observed OISST climatology to get biased projected SSTs. 
+
+The following code completes this process and once again will not run as it takes a long time and would need some modification to run on other machines. Within the code, we make use of three functions: a calc_climatology function, a calc_anomaly function and a calc_proj_sst function. Each of these functions can be viewed in the clim_sst_functions.R code.
+```{r}
+source("https://raw.githubusercontent.com/GMRI-SEL/LabFunctionsandCode/master/GenerateSharedPathsScript.R")
+source(paste(lab.func.path, "GeneralHelpers.R", sep = ""))
+source(here::here("Code", "clim_sst_functions.R"))
+library_check(c("tidyverse", "sf", "lubridate", "here", "raster", "rts"))
+
+# List of each individual raster stack -- for each one we are going to want to calculate the climatology, and then the anomalies
+res.data.path<- "/Users/aallyn/Box/Data/"
+all.rast.ts<- tibble("Raster.TS" = c(paste(res.data.path, "OISST/OISSTNWAtl.grd", sep = ""), unlist(list.files(paste(res.data.path, "CMIP5_SST/RCP85", sep = ""), pattern = "Full.grd", full.names = TRUE)), list.files(paste(res.data.path, "CMIP5_SST/RCP45", sep = ""), pattern = "Full.grd", full.names = TRUE)))
+
+# Output path
+all.rast.ts<- all.rast.ts %>%
+  separate("Raster.TS", c("Path", "File"), sep = "/(?!.*/)", remove = FALSE)
+all.rast.ts$res.ts<- ifelse(grepl("OISST", all.rast.ts$Raster.TS), "daily", "monthly")
+  
+# First, climatology with calc_climatology
+all.rast.ts<- all.rast.ts %>%
+  mutate(., "Raster.Clim" = pmap(list(raster.ts = Raster.TS, res.ts = res.ts, res.clim = "monthly", baseline = list(c("1982-01-01", "2011-01-01")), out.path = Path, out.file = File), calc_climatology))
+
+# Okay, got the climatology, now need to calculate the anomalies. To do that, we probably want to split out the Raster.Clim list column and have two new columns...one for the mean and one for the SD.
+rast.clim.temp<- all.rast.ts %>%
+  dplyr::select(., Raster.TS, Raster.Clim) %>%
+  unnest(cols = c(Raster.Clim)) 
+
+rast.clim.mu<- rast.clim.temp[seq(from = 1, to = nrow(rast.clim.temp), by = 2),]
+colnames(rast.clim.mu)[2]<- "Clim.Mu"
+rast.clim.sd<- rast.clim.temp[seq(from = 2, to = nrow(rast.clim.temp), by = 2),]
+colnames(rast.clim.sd)[2]<- "Clim.SD"
+rast.clim.merge<- rast.clim.mu %>%
+  left_join(., rast.clim.sd)
+
+all.rast.ts<- all.rast.ts %>%
+  left_join(., rast.clim.merge)
+
+# Only going to do this for the climate models, not the OISST (row 1)
+clim.rast.ts<- all.rast.ts[-1, ]
+
+clim.rast.ts<- clim.rast.ts %>%
+  mutate(., "Clim.Anom" = pmap(list(raster.ts = Raster.TS, raster.clim.mu = Clim.Mu, raster.clim.sd = Clim.SD, anom.type = "Standardized", out.path = Path, out.file = File), calc_anomaly))
+
+# Now, going to apply the anomalies to the observed OISST climatology to get a biased corrected projected temperature.
+clim.rast.ts<- clim.rast.ts %>%
+  mutate(., "Proj.SST" = pmap(list(raster.anom = Clim.Anom, raster.clim = list(all.rast.ts$Clim.Mu[[1]]), out.path = Path, out.file = File), calc_proj_sst))
+
+# Alright, now need to go from a raster stack Proj.SST to a data frame then calculate the mean and 95% CI
+stack_to_df<- function(rast.stack){
+  df.out<- as.data.frame(rast.stack, xy = TRUE)
+  df.out<- df.out %>%
+    gather(., "Year", "SST", -x, -y)
+  return(df.out)
+}
+
+clim.rast.ts<- clim.rast.ts %>%
+  mutate(., "Proj.SST.DF" = map(Proj.SST, stack_to_df))
+saveRDS(clim.rast.ts, "~/Box/Data/CMIP5_SST/ProcessedSSTProjectionsWithRasters.rds")
+
+
+clim.out<- clim.rast.ts %>%
+  dplyr::select(., Raster.TS, File, Proj.SST.DF) %>%
+  unnest()
+
+clim.out$Year<- gsub("X", "", gsub("[.]", "-", clim.out$Year))
+clim.out$Scenario<- ifelse(grepl("85", clim.out$Raster.TS), "RCP85", "RCP45")
+
+clim.out<- clim.out %>%
+  dplyr::filter(., Year >= "1982-01-01") %>%
+  dplyr::select(., File, Scenario, Year, x, y, SST)
+saveRDS(clim.out, "~/Box/Data/CMIP5_SST/ProcessedSSTProjections.rds")
+```
+
+# Results
+With everything processed, we can now explore the projections and see how things look. One key thing to note here is that while we were able to crop the files to an extent of interest, to get just the data within the Northeast Large Marine Ecosystem, we complete one more mask of the raster files. In the code below, we work towards producing a simple time series plot showing the projected SSTs for the climate models ensemble mean, 5th, and 95th percentiles for each of the two scenarios. To run this code chunk would require switching eval to TRUE and will take (~ 25 minutes).
+
+```{r}
+library(raster)
+library(tidyverse)
+
+# Read in the RDS climate model projections data -- change this path!!
+clim.out<- readRDS("~/Box/Data/CMIP5_SST/ProcessedSSTProjections.rds")
+
+# Mean, rcp45 and rcp85
+clim.summs<- clim.out %>%
+  separate(Year, into = c("Year", "Month", "Day")) %>%
+  group_by(Scenario, Year, Month, x, y) %>%
+  summarize("Mean" = mean(SST, na.rm = TRUE),
+            "Pct5th" = quantile(SST, probs = c(0.05), na.rm = TRUE, names = FALSE),
+            "Pct95th" = quantile(SST, probs = c(0.95), na.rm = TRUE, names = FALSE))
+
+clim.summs<- clim.summs %>%
+  group_by(Scenario, Year, Month) %>%
+  nest()
+
+df_to_rast<- function(df, stat, mask = nelme) {
+  if(FALSE){
+    df<- clim.summs$data[[1]]
+    stat<- "Mean.SST"
+  }
+  
+  df.temp<- df %>%
+    dplyr::select(x, y, stat)
+  
+  rast.temp<- rasterFromXYZ(df.temp)
+  rast.out<- mask(rast.temp, nelme)
+  return(rast.out)
+}
+
+clim.summs<- clim.summs %>%
+  mutate(., "RasterStack.Mean" = map2(data, "Mean", df_to_rast),
+         "RasterStack.Pct05" = map2(data, "Pct5th", df_to_rast),
+         "RasterStack.Pct95" = map2(data, "Pct95th", df_to_rast))
+
+rcp85<- clim.summs %>%
+  dplyr::filter(., Scenario == "RCP85")
+rcp45<- clim.summs %>%
+  dplyr::filter(., Scenario == "RCP45")
+
+rcp85.mu<- raster::stack(rcp85$RasterStack.Mean)
+names(rcp85.mu)<- paste(rcp85$Year, rcp85$Month, sep = ".")
+rcp85.5th<- raster::stack(rcp85$RasterStack.Pct05)
+names(rcp85.5th)<- paste(rcp85$Year, rcp85$Month, sep = ".")
+rcp85.95th<- raster::stack(rcp85$RasterStack.Pct95)
+names(rcp85.95th)<- paste(rcp85$Year, rcp85$Month, sep = ".")
+
+rcp45.mu<- raster::stack(rcp45$RasterStack.Mean)
+names(rcp45.mu)<- paste(rcp45$Year, rcp45$Month, sep = ".")
+rcp45.5th<- raster::stack(rcp45$RasterStack.Pct05)
+names(rcp45.5th)<- paste(rcp45$Year, rcp45$Month, sep = ".")
+rcp45.95th<- raster::stack(rcp45$RasterStack.Pct95)
+names(rcp45.95th)<- paste(rcp45$Year, rcp45$Month, sep = ".")
+
+rcp85.mu.df<- as.data.frame(rcp85.mu, xy = TRUE) %>%
+  gather(., "Year", "SST.Mean", -x, -y)
+rcp85.5th.df<- as.data.frame(rcp85.5th, xy = TRUE) %>%
+  gather(., "Year", "SST.pct5th", -x, -y)
+rcp85.95th.df<- as.data.frame(rcp85.95th, xy = TRUE) %>%
+  gather(., "Year", "SST.pct95th", -x, -y)
+
+rcp85.df.all<- rcp85.mu.df
+rcp85.df.all$SST.pct5th<- rcp85.5th.df$SST.pct5th
+rcp85.df.all$SST.pct95th<- rcp85.95th.df$SST.pct95th
+
+rcp85.df.all$Year<- gsub("X", "", gsub("[.]", "-", rcp85.df.all$Year))
+rcp85.df.all<- rcp85.df.all %>%
+  separate(Year, into = c("Year", "Month", "Day")) %>%
+  group_by(Year, Month) %>%
+  summarize(NELME.SST.Mean = mean(SST.Mean, na.rm = TRUE),
+            NELME.SST.pct5th = mean(SST.pct5th, na.rm = TRUE),
+            NELME.SST.pct95th = mean(SST.pct95th, na.rm = TRUE))
+rcp85.df.all$Scenario<- rep("RCP85", nrow(rcp85.df.all))
+
+rcp45.mu.df<- as.data.frame(rcp45.mu, xy = TRUE) %>%
+  gather(., "Year", "SST.Mean", -x, -y)
+rcp45.5th.df<- as.data.frame(rcp45.5th, xy = TRUE) %>%
+  gather(., "Year", "SST.pct5th", -x, -y)
+rcp45.95th.df<- as.data.frame(rcp45.95th, xy = TRUE) %>%
+  gather(., "Year", "SST.pct95th", -x, -y)
+
+rcp45.df.all<- rcp45.mu.df
+rcp45.df.all$SST.pct5th<- rcp45.5th.df$SST.pct5th
+rcp45.df.all$SST.pct95th<- rcp45.95th.df$SST.pct95th
+
+rcp45.df.all$Year<- gsub("X", "", gsub("[.]", "-", rcp45.df.all$Year))
+rcp45.df.all<- rcp45.df.all %>%
+  separate(Year, into = c("Year", "Month", "Day")) %>%
+  group_by(Year, Month) %>%
+  summarize(NELME.SST.Mean = mean(SST.Mean, na.rm = TRUE),
+            NELME.SST.pct5th = mean(SST.pct5th, na.rm = TRUE),
+            NELME.SST.pct95th = mean(SST.pct95th, na.rm = TRUE))
+rcp45.df.all$Scenario<- rep("RCP45", nrow(rcp45.df.all))
+
+rcp.all<- bind_rows(rcp85.df.all, rcp45.df.all)
+rcp.all$Scenario<- factor(rcp.all$Scenario, levels = c("RCP85", "RCP45"))
+
+# Plot, raw temps
+rcp.all$Plot.Date<- as.Date(paste(rcp.all$Year, rcp.all$Month, "15", sep = "-"))
+rcp.all<- rcp.all %>%
+  dplyr::filter(., Plot.Date < "2100-01-15")
+
+rcp.plot<- rcp.all %>%
+  group_by(Year, Scenario) %>%
+  summarize(NELME.SST.YrMean = mean(NELME.SST.Mean, na.rm = TRUE),
+            NELME.SST.Yrpct5th = mean(NELME.SST.pct5th, na.rm = TRUE),
+            NELME.SST.Yrpct95th = mean(NELME.SST.pct95th, na.rm = TRUE))
+
+rcp.plot.out<- ggplot() + 
+  geom_line(data = rcp.plot, aes(x = as.numeric(Year), y = NELME.SST.YrMean, color = Scenario)) +
+  geom_ribbon(data = rcp.plot, aes(x = as.numeric(Year), ymin = NELME.SST.Yrpct5th, ymax = NELME.SST.Yrpct95th, fill = Scenario), alpha=0.15) +
+  scale_color_manual(name = "Scenario", values = c("#e31a1c", "#1f78b4")) +
+  scale_fill_manual(name = "Scenario", values = c("#e31a1c", "#1f78b4")) +
+  labs(x = "Year", y = "Ensemble Projected SST", fill = "Scenario") +
+  ylim(c(10, 20)) +
+  theme(strip.background = element_blank(), axis.text.x=element_text(angle=90, hjust=1)) 
+ggsave("~/Desktop/RCPPlot.jpg", rcp.plot.out)
+rcp.plot.out
+
+# Save the csv
+write_csv(rcp.plot, "~/Box/Mills Lab/Projects/PhysOce/Output/RCP45andRCP85_NELMEProjectedSSTs.csv")
+```
+
+# Conclusions and next steps
+While funcitonal, there are many improvements that could be made to this workflow. As a first step, it'd be worthwhile looking into [Mark Payne's new R/CDO library](https://github.com/markpayneatwork/ClimateOperators). In particular, it'd be great to get rid of as many of the loops as possible. Additionally, towards the end I worked with rcp45 and rcp85 independently with a lot of copying/pasting repetitive code (mostly just to check things were working) and I am sure this can be cleaned up. 
